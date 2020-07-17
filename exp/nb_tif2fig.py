@@ -35,17 +35,18 @@ def to_8bit(x):
 
 
 #================================================
-def tif2rgb(x):
+def tif2rgb(x,rgb=[2,1,0]):
     '''
     把x转换为rgb图像。
     -----------------------
     input:
-    x: 一个array，维度为[c,h,w]，其中第一个维度的通道数c>3，且其前3个通道为 B,G,R
+    x: 一个array，维度为[c,h,w]，其中第一个维度的通道数c>=3
+    rgb: 把x的哪3个通道作为rgb通道来可视化，[2,1,0] or [3,2,1]
     -----------------------
     return: 一个array，维度为[h,w,3]，通道为R,G,B，且像素值在[0,255]范围
     '''
     x = x.transpose((1,2,0))
-    x = x[...,[2,1,0]]
+    x = x[...,rgb]
     x = to_8bit(x)
     x = x.astype(np.uint)
     return x
@@ -70,13 +71,14 @@ def tif2mask(x,mask_value=255):
 
 
 #================================================
-def save_tif_as_fig(tif_fn, fig_fn, is_mask=False, mask_value=255):
+def save_tif_as_fig(tif_fn, fig_fn, rgb=[2,1,0], is_mask=False, mask_value=255):
     '''
     把tif文件转换并保存为图像文件。
     ------------------------------------
     input:
     tif_fn: tif文件的路径
     fig_fn：要保存的图像文件的路径
+    rgb: 把tif中的哪3个通道作为rgb通道来可视化，[2,1,0] or [3,2,1]
     is_mask：是否mask
     mask_value：若is_mask=True，则mask像素值设置为mask_value
     '''
@@ -84,5 +86,5 @@ def save_tif_as_fig(tif_fn, fig_fn, is_mask=False, mask_value=255):
     if is_mask:
         fig = tif2mask(tif, mask_value)
     else:
-        fig = tif2rgb(tif)
+        fig = tif2rgb(tif, rgb=[2,1,0])
     cv2.imwrite(fig_fn, fig)
