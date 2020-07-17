@@ -1,0 +1,16 @@
+# notebook checkpoint
+/.ipynb_checkpoints/
+
+# data
+/data/
+
+# __pycache__
+/__pycache__/
+exp/__pycache__/
+
+# models
+/models/
+
+# log
+run_log/
+tb_log/
