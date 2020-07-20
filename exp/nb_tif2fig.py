@@ -9,6 +9,7 @@ import numpy as np
 
 
 #================================================
+# 为什么用这个包？opencv也可以读tif文件，但是它只适合读较小的文件，对于特别大的tif，例如几个G，则需要tiff来读
 import tifffile as tiff
 
 
@@ -58,13 +59,14 @@ def tif2mask(x,mask_value=255):
     把x转换为单通道mask.
     --------------------------
     input:
-    x: 一个array，维度为[c,h,w]，其中第一个维度的通道数c>=1，其中值>0的像素为mask
+    x: 一个array，维度为[c,h,w]或[h,w]，其中值>0的像素为mask
     mask_value：在输出中，mask像素的值设置为mask_value
     --------------------------
     return: 一个array，维度为[h,w]，mask像素值为mask_value，其它像素值为0
     '''
-    x = x.transpose((1,2,0))
-    x = x[...,0]
+    if len(x.shape)>2:
+        x = x.transpose((1,2,0))
+        x = x[...,0]
     x[x>0] = mask_value
     x = x.astype(np.uint)
     return x
