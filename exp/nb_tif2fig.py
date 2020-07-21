@@ -88,5 +88,5 @@ def save_tif_as_fig(tif_fn, fig_fn, rgb=[2,1,0], is_mask=False, mask_value=255):
     if is_mask:
         fig = tif2mask(tif, mask_value)
     else:
-        fig = tif2rgb(tif, rgb=[2,1,0])
+        fig = tif2rgb(tif, rgb=rgb)
     cv2.imwrite(fig_fn, fig)
