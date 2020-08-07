@@ -55,7 +55,7 @@ def notebook2script(fname=None, outputDir=None, allFiles=None, upTo=None, ):
 def notebook2scriptSingle(fname, outputDir):
     "Finds cells starting with `#export` and puts them into a new module"
     fname = Path(fname)
-    fname_out = f'nb_{fname.stem}.py'
+    fname_out = f'{fname.stem}.py'
     main_dic = json.load(open(fname,'r',encoding="utf-8"))
     code_cells = [c for c in main_dic['cells'] if is_export(c)]
     module = f'''
