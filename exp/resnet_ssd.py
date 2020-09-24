@@ -29,7 +29,6 @@ from torchvision.models.resnet import conv1x1
 
 
 #================================================
-from FLAI.detect_symbol.exp import databunch
 from FLAI.detect_symbol.exp import resnet_ssd as resnet_ssd_detsym
 
 

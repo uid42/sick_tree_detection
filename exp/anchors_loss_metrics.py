@@ -6,12 +6,12 @@
 
 #================================================
 import sys
-sys.path.append('../')
+if '..' not in sys.path:
+    sys.path.append('..')
 from exp import resnet_ssd
 
 
 #================================================
-from FLAI.detect_symbol.exp import databunch
 #from detect_symbol.exp import nb_init_model
 from FLAI.detect_symbol.exp import resnet_ssd as resnet_ssd_detsym
 from FLAI.detect_symbol.exp import anchors_loss_metrics as anchors_loss_metrics_detsym
@@ -42,6 +42,12 @@ import math
 
 
 #================================================
+#进行一个测试。扩大一下discard区域范围。
+#也就是为了防止发病的标记是成片分布的，没有标记的会影响效果。
+TEST_2020904_ = True
+
+
+#================================================
 def find_neibs(idx, grids = (49, 49), dis = 1):
     '''
     找到某个anchor周围相邻的anchors的下标里列表。距离默认1。
@@ -54,6 +60,9 @@ def find_neibs(idx, grids = (49, 49), dis = 1):
     返回值：
         邻居的下标列表
     '''
+    if TEST_2020904_:
+        dis = 5
+
     gh, gw = grids
     x = idx % gh
     y = idx // gw
@@ -70,28 +79,40 @@ def find_neibs(idx, grids = (49, 49), dis = 1):
 
 
 #================================================
+def get_y(pts):
+    keep = pts.abs().sum(-1).nonzero()[:,0]
+    return keep
+
+
+#================================================
 #定义一个新的GridAnchor_Functions，主要是修改:
 #get_scroe_hits->get_hits,b2t->b2c,t2b->c2b;
+#LblPts指定是使用ImageBBox还是labled points
 class GridAnchor_Funcs(anchors_loss_metrics_detsym.GridAnchor_Funcs):
-    def __init__(self, fig_hw, grids, device):
+    def __init__(self, fig_hw, grids, device, LblPts = True):
         anchors = [[(0, 0)]]
         gvs,ghs,gws,avs,ahs,aws = anchors_loss_metrics_detsym.get_grids_anchors( \
                     fig_hw, grids, anchors)
         self.grids = grids
+        self.LblPts = LblPts
         super().__init__(gvs, avs, device)
 
     #下面的三个函数都用不上了。防止被调用到。
-    def get_scores_hits(self, gt_bboxs):
+    def get_scores_hits(self, gt_bb_or_lpts):
         assert False, 'deleted'
-    def b2t(self, gt_bboxs,idx,eps=1):
+    def b2t(self, gt_bb_or_lpts,idx,eps=1):
         assert False, 'deleted'
     def t2b(self,t,idx,eps=1):
         assert False, 'deleted'
 
-    def get_hits(self, gt_bboxs):
+    def get_hits(self, gt_bb_or_lpts):
         # ground truch bbox center x,y
-        gt_cx = gt_bboxs[:,[0,2]].mean(-1)
-        gt_cy = gt_bboxs[:,[1,3]].mean(-1)
+        if not self.LblPts:
+            gt_cx = gt_bb_or_lpts[:,[0,2]].mean(-1)
+            gt_cy = gt_bb_or_lpts[:,[1,3]].mean(-1)
+        else:
+            gt_cx = gt_bb_or_lpts[:,[0]].mean(-1)
+            gt_cy = gt_bb_or_lpts[:,[1]].mean(-1)
 
         # 判断目标bbox的中心落在哪个cell内
         hits = ((gt_cx[:,None] >= self.gvs[:,0][None]) &
@@ -101,16 +122,20 @@ class GridAnchor_Funcs(anchors_loss_metrics_detsym.GridAnchor_Funcs):
 
         return hits
 
-    def b2c(self, gt_bboxs,idx,eps=1):
+    def b2c(self, gt_bb_or_lpts,idx,eps=1):
         '''
-        gt_bbox->center
+        gt_bb_or_lpts->center
         '''
         cx,cy = self.gvs[idx,0],self.gvs[idx,1]
         gh,gw = self.ghs[idx],self.gws[idx]
         #ph,pw = self.ahs[idx],self.aws[idx]
 
-        bx = (gt_bboxs[:,0] + gt_bboxs[:,2])/2 # x of center of box
-        by = (gt_bboxs[:,1] + gt_bboxs[:,3])/2 # y of center of box
+        if not self.LblPts:
+            bx = (gt_bb_or_lpts[:,0] + gt_bb_or_lpts[:,2])/2 # x of center of box
+            by = (gt_bb_or_lpts[:,1] + gt_bb_or_lpts[:,3])/2 # y of center of box
+        else:
+            bx = gt_bb_or_lpts[:,0]
+            by = gt_bb_or_lpts[:,1]
         hatsig_tx = (bx - cx)/gh
         hatsig_ty = (by - cy)/gw
 
@@ -124,7 +149,9 @@ class GridAnchor_Funcs(anchors_loss_metrics_detsym.GridAnchor_Funcs):
 
     def c2b(self,t,idx,eps=1):
         '''
-        center->bbox.这些bbox都是没有宽高的。也就是后右下角坐标和左上角坐标相同。
+        center->gt_bb_or_lpts.
+            如果是ImageBBox那么这些bbox都是没有宽高的。也就是后右下角坐标和左上角坐标相同。
+            或者是Points
         '''
         cx,cy = self.gvs[idx,0],self.gvs[idx,1]
         gh,gw = self.ghs[idx],self.gws[idx]
@@ -138,7 +165,10 @@ class GridAnchor_Funcs(anchors_loss_metrics_detsym.GridAnchor_Funcs):
         bx = hatsig_tx*gw + cx # x of center of box
         by = hatsig_ty*gh + cy # y of center of box
 
-        res = torch.stack([bx, by, bx, by],dim=0)
+        if not self.LblPts:
+            res = torch.stack([bx, by, bx, by],dim=0)
+        else:
+            res = torch.stack([bx, by],dim=0)
         res = res.permute(list(range(len(res.shape)))[1:]+[0])
         return res
 
@@ -151,17 +181,20 @@ def clas_acc(pred_batch, *gt_batch, gaf):
     '''
     posCnt = tensor(0.)
     totCnt = tensor(0.)
-    for pred_clas,gt_bboxs,gt_clas in zip(pred_batch[2], *gt_batch):
-        keep = anchors_loss_metrics_detsym.get_y(gt_bboxs)
+    for pred_clas,gt_bb_or_lpts,gt_clas in zip(pred_batch[2], *gt_batch):
+        if not gaf.LblPts:
+            keep = anchors_loss_metrics_detsym.get_y(gt_bb_or_lpts)
+        else:
+            keep = get_y(gt_bb_or_lpts)
         if keep.numel()==0: continue
 
-        gt_bboxs = gt_bboxs[keep]
+        gt_bb_or_lpts = gt_bb_or_lpts[keep]
         gt_clas = gt_clas[keep]
 
-        gt_bboxs = (gt_bboxs + 1) / 2
+        gt_bb_or_lpts = (gt_bb_or_lpts + 1) / 2
         gt_clas = gt_clas - 1 # the databunch add a 'background' class to classes[0], but we don't want that,so gt_clas-1
 
-        hits = gaf.get_hits(gt_bboxs)
+        hits = gaf.get_hits(gt_bb_or_lpts)
         idx = idx_fromHits(hits)
 
         pred_clas = pred_clas[idx]
@@ -181,17 +214,20 @@ def clas_L(pred_batch, *gt_batch, lambda_clas=1, clas_weights=None, gaf):
     '''
     loss = 0
     cnt = 0
-    for pred_clas,gt_bboxs,gt_clas in zip(pred_batch[2], *gt_batch):
-        keep = anchors_loss_metrics_detsym.get_y(gt_bboxs)
+    for pred_clas,gt_bb_or_lpts,gt_clas in zip(pred_batch[2], *gt_batch):
+        if gaf.LblPts:
+            keep = get_y(gt_bb_or_lpts)
+        else:
+            keep = anchors_loss_metrics_detsym.get_y(gt_bb_or_lpts)
         if keep.numel()==0: continue
 
-        gt_bboxs = gt_bboxs[keep]
+        gt_bb_or_lpts = gt_bb_or_lpts[keep]
         gt_clas = gt_clas[keep]
 
-        gt_bboxs = (gt_bboxs + 1) / 2
+        gt_bb_or_lpts = (gt_bb_or_lpts + 1) / 2
         gt_clas = gt_clas - 1 # the databunch add a 'background' class to classes[0], but we don't want that,so gt_clas-1
 
-        hits = gaf.get_hits(gt_bboxs)
+        hits = gaf.get_hits(gt_bb_or_lpts)
         idx = idx_fromHits(hits)
 
         pred_clas = pred_clas[idx]
@@ -210,23 +246,26 @@ def cent_L(pred_batch, *gt_batch, lambda_cent=1, clas_weights=None, gaf):
     '''
     loss = 0
     cnt = 0
-    for pred_txy,gt_bboxs,gt_clas in zip(pred_batch[0], *gt_batch):
-        keep = anchors_loss_metrics_detsym.get_y(gt_bboxs)
+    for pred_txy,gt_bb_or_lpts,gt_clas in zip(pred_batch[0], *gt_batch):
+        if not gaf.LblPts:
+            keep = anchors_loss_metrics_detsym.get_y(gt_bb_or_lpts)
+        else:
+            keep = get_y(gt_bb_or_lpts)
         if keep.numel()==0: continue
 
-        gt_bboxs = gt_bboxs[keep]
+        gt_bb_or_lpts = gt_bb_or_lpts[keep]
         gt_clas = gt_clas[keep]
 
-        gt_bboxs = (gt_bboxs + 1) / 2
+        gt_bb_or_lpts = (gt_bb_or_lpts + 1) / 2
         gt_clas = gt_clas - 1
 
         if clas_weights is not None: ws = clas_weights[gt_clas]
         else: ws = None
 
-        hits = gaf.get_hits(gt_bboxs)
+        hits = gaf.get_hits(gt_bb_or_lpts)
         idx = idx_fromHits(hits)
 
-        gt_t = gaf.b2c(gt_bboxs,idx,eps=1)
+        gt_t = gaf.b2c(gt_bb_or_lpts,idx,eps=1)
         pred_txy = pred_txy[idx]
 
         if ws is not None:
@@ -248,20 +287,24 @@ def pConf_L(pred_batch, *gt_batch, lambda_pconf=1, clas_weights=None, gaf):
     '''
     loss = 0
     cnt = 0
-    for pred_conf,gt_bboxs,gt_clas in zip(pred_batch[1], *gt_batch):
-        keep = anchors_loss_metrics_detsym.get_y(gt_bboxs)
+    for pred_conf,gt_bb_or_lpts,gt_clas in zip(pred_batch[1], *gt_batch):
+        if not gaf.LblPts:
+            keep = anchors_loss_metrics_detsym.get_y(gt_bb_or_lpts)
+        else:
+            keep = get_y(gt_bb_or_lpts)
+
         if keep.numel()==0: continue
 
-        gt_bboxs = gt_bboxs[keep]
+        gt_bb_or_lpts = gt_bb_or_lpts[keep]
         gt_clas = gt_clas[keep]
 
-        gt_bboxs = (gt_bboxs + 1) / 2
+        gt_bb_or_lpts = (gt_bb_or_lpts + 1) / 2
         gt_clas = gt_clas - 1
 
         if clas_weights is not None: ws = clas_weights[gt_clas]
         else: ws = None
 
-        hits = gaf.get_hits(gt_bboxs)
+        hits = gaf.get_hits(gt_bb_or_lpts)
         idx = idx_fromHits(hits)
 
         conf_pos = pred_conf[idx]
@@ -287,14 +330,17 @@ def nConf_L(pred_batch, *gt_batch, gaf, conf_th=0.5, lambda_nconf=1):
     '''
     loss = 0
     cnt = 0
-    for pred_conf,gt_bboxs,_ in zip(pred_batch[1], *gt_batch):
-        keep = anchors_loss_metrics_detsym.get_y(gt_bboxs)
+    for pred_conf,gt_bb_or_lpts,_ in zip(pred_batch[1], *gt_batch):
+        if not gaf.LblPts:
+            keep = anchors_loss_metrics_detsym.get_y(gt_bb_or_lpts)
+        else:
+            keep = get_y(gt_bb_or_lpts)
         if keep.numel()==0: continue
 
-        gt_bboxs = gt_bboxs[keep]
-        gt_bboxs = (gt_bboxs + 1) / 2
+        gt_bb_or_lpts = gt_bb_or_lpts[keep]
+        gt_bb_or_lpts = (gt_bb_or_lpts + 1) / 2
 
-        hits = gaf.get_hits(gt_bboxs)
+        hits = gaf.get_hits(gt_bb_or_lpts)
         idx = idx_fromHits(hits)
 
         #positive
@@ -346,8 +392,11 @@ def yolo_L(pred_batch, *gt_batch, conf_th=0.5,
     pos_cnt = 0
     neg_cnt = 0
 
-    for pred_txy,pred_conf,pred_clas,gt_bboxs,gt_clas in zip(*pred_batch, *gt_batch):
-        keep = anchors_loss_metrics_detsym.get_y(gt_bboxs)
+    for pred_txy,pred_conf,pred_clas,gt_bb_or_lpts,gt_clas in zip(*pred_batch, *gt_batch):
+        if not gaf.LblPts:
+            keep = anchors_loss_metrics_detsym.get_y(gt_bb_or_lpts)
+        else:
+            keep = get_y(gt_bb_or_lpts)
         if keep.numel()==0:
             #这时候所有anchor都是negative的。所以空白的也要贡献自己的loss
             conf_neg = pred_conf#所有anchor的
@@ -355,16 +404,16 @@ def yolo_L(pred_batch, *gt_batch, conf_th=0.5,
             neg_cnt += len(pred_conf)
             continue
 
-        gt_bboxs = gt_bboxs[keep]
+        gt_bb_or_lpts = gt_bb_or_lpts[keep]
         gt_clas = gt_clas[keep]
 
-        gt_bboxs = (gt_bboxs + 1) / 2
+        gt_bb_or_lpts = (gt_bb_or_lpts + 1) / 2
         gt_clas = gt_clas - 1 # the databunch add a 'background' class to classes[0], but we don't want that,so gt_clas-1
 
         if clas_weights is not None: ws = clas_weights[gt_clas]
         else: ws = None
 
-        hits = gaf.get_hits(gt_bboxs)
+        hits = gaf.get_hits(gt_bb_or_lpts)
         idx = idx_fromHits(hits)
 
         # classification loss
@@ -372,7 +421,7 @@ def yolo_L(pred_batch, *gt_batch, conf_th=0.5,
         clas_loss += F.cross_entropy(pred_clas, gt_clas, weight=clas_weights, reduction='sum')
 
         # bbox center loss
-        gt_t = gaf.b2c(gt_bboxs,idx,eps=1)
+        gt_t = gaf.b2c(gt_bb_or_lpts,idx,eps=1)
         pred_txy = pred_txy[idx]
         if ws is not None:
             cent_loss += ((gt_t[...,:2]-pred_txy)*ws[...,None]).abs().sum()
@@ -442,22 +491,29 @@ def cent_d(pred_batch, *gt_batch, gaf):
     '''
     dif = tensor(0.)
     cnt = tensor(0.)
-    for pred_txy,gt_bboxs,_ in zip(pred_batch[0], *gt_batch):
-        keep = anchors_loss_metrics_detsym.get_y(gt_bboxs)
+    for pred_txy,gt_bb_or_lpts,_ in zip(pred_batch[0], *gt_batch):
+        if not gaf.LblPts:
+            keep = anchors_loss_metrics_detsym.get_y(gt_bb_or_lpts)
+        else:
+            keep = get_y(gt_bb_or_lpts)
         if keep.numel()==0: continue
 
         #pred_t = torch.cat([pred_txy,pred_thw],dim=1)
         pred_t = pred_txy
 
-        gt_bboxs = gt_bboxs[keep]
-        gt_bboxs = (gt_bboxs + 1) / 2
+        gt_bb_or_lpts = gt_bb_or_lpts[keep]
+        gt_bb_or_lpts = (gt_bb_or_lpts + 1) / 2
 
-        hits = gaf.get_hits(gt_bboxs)
+        hits = gaf.get_hits(gt_bb_or_lpts)
         idx = idx_fromHits(hits)
 
         pred_t = pred_t[idx]
-        pred_c = bbox2c(gaf.c2b(pred_t,idx))[...,:2]
-        gt_c = bbox2c(gt_bboxs)[...,:2]
+        if not gaf.LblPts:
+            pred_c = bbox2c(gaf.c2b(pred_t,idx))[...,:2]
+            gt_c = bbox2c(gt_bb_or_lpts)[...,:2]
+        else:
+            pred_c = gaf.c2b(pred_t,idx)
+            gt_c = gt_bb_or_lpts
 
         tmp = (gt_c - pred_c).abs().sum()
         dif += tmp
