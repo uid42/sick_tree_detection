@@ -21,6 +21,10 @@ import torchvision
 
 
 #================================================
+from collections import OrderedDict
+
+
+#================================================
 from IPython.core import debugger as idb
 
 
@@ -97,6 +101,48 @@ class ResNetIsh_1SSD(resnet_ssd_detsym.ResNetIsh_1SSD):
 
 
 #================================================
+class ResNetIsh_1SSD_fpn(ResNetIsh_1SSD):
+    '''
+    带fpn的
+    '''
+    def init_fpn(self):
+        assert len(self.pred_layerIds) > 1
+        #这个现在固定的就是resnet18用的
+        self.fpn = torchvision.ops.FeaturePyramidNetwork([256, 512, 1024], 256)
+
+    def _forward_impl(self, x):
+        # See note [TorchScript super()]
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
+
+        outs = []
+        input4fpn = OrderedDict()
+        for i in range(len(self.res_blocks)):
+            x = self.res_blocks[i](x)
+            if i in self.pred_layerIds:
+                #>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+#                 outs += [self.neck_blocks[i-self.pred_layerIds[0]](x)]
+                ################################
+                if self.fpn is None:#没有fpn，直接用neck_block
+                    neck_out = self.neck_blocks[i-self.pred_layerIds[0]](x)
+                    outs += [self.head_block(neck_out)]
+                else:#如果有fpn跳过neck_block
+                    key = 'feat%d' % (i-self.pred_layerIds[0])
+                    input4fpn[key] = x
+                #<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+        if self.fpn is not None:
+            fpnout = self.fpn(input4fpn)
+            #先只取最终合并完成的那个特征图。这个和之前的只用一层的特征图的行为是一致的
+            outs += [self.head_block(fpnout['feat0'])]
+
+        return outs
+
+
+
+
+#================================================
 def get_resnet18_1ssd(layers4fpn = False, num_classes = 1):
     #layers4fpn是否保留后面的两层给fpn用
     if not layers4fpn:
@@ -115,7 +161,7 @@ def get_resnet18_1ssd(layers4fpn = False, num_classes = 1):
                    layers=[2,2,2,2,2],
                    chs=[64,128,256,512,1024],
                    strides=[1,2,2,2,2],
-                   pred_layerIds=[2],
+                   pred_layerIds=[2, 3, 4],
                    num_anchors=1,
                    neck_block=resnet_ssd_detsym.cnv1x1_bn_relu,
                    head_chin=256,
@@ -139,7 +185,7 @@ def get_resnet18_ssd(layers4fpn = False, num_classes = 1):
                   layers=[2,2,2,2,2],
                   chs=[64,128,256,512,1024],
                   strides=[1,2,2,2,2],
-                  pred_layerIds=[2],
-                  num_anchors=[1],
+                  pred_layerIds=[2, 3, 4],
+                  num_anchors=[1, 1, 1],
                   pred_block=ssd_block,
                   num_classes=num_classes)
